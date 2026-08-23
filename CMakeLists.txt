@@ -2181,6 +2181,17 @@ if (ENGINE_BUILD_TESTS)
         COMMAND model_spec_system_test
     )
 
+    add_engine_unittest(fish_audio_streaming_test tests/unittests/test_fish_audio_streaming.cpp)
+    target_compile_definitions(fish_audio_streaming_test PRIVATE
+        ENGINE_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_include_directories(fish_audio_streaming_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+
+    add_test(
+        NAME fish_audio_streaming_test
+        COMMAND fish_audio_streaming_test
+    )
+
     add_engine_unittest(qwen3_forced_aligner_processor_test tests/unittests/test_qwen3_forced_aligner_processor.cpp)
     target_include_directories(qwen3_forced_aligner_processor_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 

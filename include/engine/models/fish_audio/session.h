@@ -10,10 +10,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace engine::models::fish_audio {
 
-class FishAudioSession final : public runtime::RuntimeSessionBase, public runtime::IOfflineVoiceTaskSession {
+class FishAudioSession final
+    : public runtime::RuntimeSessionBase,
+      public runtime::IOfflineVoiceTaskSession,
+      public runtime::IStreamingVoiceTaskSession {
 public:
     FishAudioSession(
         runtime::TaskSpec task,
@@ -26,6 +30,15 @@ public:
     runtime::RunMode run_mode() const override;
     void prepare(const runtime::SessionPreparationRequest & request) override;
     runtime::TaskResult run(const runtime::TaskRequest & request) override;
+
+    runtime::StreamingPolicy streaming_policy() const override;
+    void start_stream(const runtime::TaskRequest & request) override;
+    std::optional<runtime::StreamEvent> next_stream_event() override;
+    void set_stream_event_sink(runtime::StreamEventCallback sink) override;
+    runtime::TaskResult finish_stream() override;
+    void reset() override;
+    runtime::StreamEvent process_audio_chunk(const runtime::AudioChunk & chunk) override;
+    runtime::TaskResult finalize() override;
 
 private:
     struct ReferenceCacheKey {
@@ -53,6 +66,13 @@ private:
     std::optional<FishAudioRequest> defaults_;
     runtime::CacheSlots<ReferenceCacheKey, ReferenceCacheEntry, ReferenceCacheKeyEqual> reference_cache_;
     std::optional<ReferenceCacheEntry> uncached_reference_;
+
+    std::vector<runtime::TaskRequest> stream_chunk_requests_;
+    std::vector<FishAudioCodes> stream_reference_codes_;
+    std::optional<FishAudioConversationTurn> stream_previous_turn_;
+    runtime::AudioBuffer stream_merged_audio_;
+    size_t stream_chunk_index_ = 0;
+    bool stream_started_ = false;
 };
 
 }  // namespace engine::models::fish_audio

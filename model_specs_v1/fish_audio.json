@@ -9,7 +9,8 @@
     "clone"
   ],
   "modes": [
-    "offline"
+    "offline",
+    "streaming"
   ],
   "languages": [
     "80+ languages"
@@ -154,7 +155,8 @@
   },
   "runtime": {
     "tags": [
-      "gguf"
+      "gguf",
+      "stream"
     ]
   },
   "sources": [

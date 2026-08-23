@@ -307,8 +307,9 @@ FishAudioSession::FishAudioSession(
       task_(task),
       assets_(require_assets(std::move(assets))),
       reference_cache_(resolve_reference_cache_slots(this->options())) {
-    if (task_.task != runtime::VoiceTaskKind::Tts || task_.mode != runtime::RunMode::Offline) {
-        throw std::runtime_error("Fish Audio only supports offline TTS sessions");
+    if (task_.task != runtime::VoiceTaskKind::Tts ||
+        (task_.mode != runtime::RunMode::Offline && task_.mode != runtime::RunMode::Streaming)) {
+        throw std::runtime_error("Fish Audio supports offline and streaming TTS sessions");
     }
     const auto ar_weight_type =
         option_weight_type(options, "fish_audio.weight_type", assets::TensorStorageType::Native);
@@ -466,6 +467,9 @@ const FishAudioCodes & FishAudioSession::resolve_reference_codes(const FishAudio
 
 runtime::TaskResult FishAudioSession::run(const runtime::TaskRequest & request) {
     require_prepared("Fish Audio run()");
+    if (task_.mode != runtime::RunMode::Offline) {
+        throw std::runtime_error("Fish Audio run requires an offline session");
+    }
     const auto wall_start = Clock::now();
     const bool mem_saver = mem_saver_from_options(options());
     const auto request_options = generation_options_from_request(request);
@@ -498,6 +502,111 @@ runtime::TaskResult FishAudioSession::run(const runtime::TaskRequest & request) 
     result.audio_output = std::move(merged_audio);
     engine::debug::timing_log_scalar("session.wall_ms", engine::debug::elapsed_ms(wall_start, Clock::now()));
     return result;
+}
+
+runtime::StreamingPolicy FishAudioSession::streaming_policy() const {
+    runtime::StreamingPolicy policy;
+    policy.input = runtime::StreamingInputKind::None;
+    policy.output = runtime::StreamingOutputKind::PullEvents;
+    return policy;
+}
+
+void FishAudioSession::start_stream(const runtime::TaskRequest & request) {
+    require_prepared("Fish Audio streaming");
+    if (task_.mode != runtime::RunMode::Streaming) {
+        throw std::runtime_error("Fish Audio start_stream requires a streaming session");
+    }
+    reset();
+    const auto request_options = generation_options_from_request(request);
+    const auto text_chunk_mode =
+        engine::text::parse_text_chunk_mode_override(request.options).value_or(engine::text::TextChunkMode::Default);
+    stream_chunk_requests_ = runtime::chunk_text_request(request, request_options.text_chunk_size, text_chunk_mode);
+    engine::debug::trace_log_scalar("fish_audio.streaming.text_chunk_size", request_options.text_chunk_size);
+    engine::debug::trace_log_scalar("fish_audio.streaming.text_chunk_mode", engine::text::text_chunk_mode_name(text_chunk_mode));
+    engine::debug::trace_log_scalar("fish_audio.streaming.text_chunk_count", static_cast<int64_t>(stream_chunk_requests_.size()));
+
+    auto first_request = make_request(stream_chunk_requests_.empty() ? request : stream_chunk_requests_.front());
+    if (!first_request.references.empty()) {
+        stream_reference_codes_.reserve(first_request.references.size());
+        for (const auto & reference : first_request.references) {
+            stream_reference_codes_.push_back(resolve_reference_codes(reference));
+        }
+    }
+
+    stream_chunk_index_ = 0;
+    stream_previous_turn_ = std::nullopt;
+    stream_merged_audio_ = runtime::AudioBuffer{};
+    stream_started_ = true;
+}
+
+std::optional<runtime::StreamEvent> FishAudioSession::next_stream_event() {
+    if (!stream_started_) {
+        throw std::runtime_error("Fish Audio streaming has not been started");
+    }
+    if (stream_chunk_index_ >= stream_chunk_requests_.size()) {
+        return std::nullopt;
+    }
+    const size_t chunk_index = stream_chunk_index_++;
+    const auto & chunk_request = stream_chunk_requests_[chunk_index];
+    auto fish_request = make_request(chunk_request);
+    if (!fish_request.references.empty() && stream_reference_codes_.empty()) {
+        stream_reference_codes_.reserve(fish_request.references.size());
+        for (const auto & reference : fish_request.references) {
+            stream_reference_codes_.push_back(resolve_reference_codes(reference));
+        }
+    }
+    const bool mem_saver = mem_saver_from_options(options());
+    const auto chunk_start = Clock::now();
+    auto generated = generator_->generate(
+        fish_request,
+        stream_reference_codes_,
+        stream_previous_turn_,
+        mem_saver);
+    engine::debug::timing_log_scalar("fish_audio.streaming.chunk_ms", engine::debug::elapsed_ms(chunk_start, Clock::now()));
+
+    runtime::StreamEvent event;
+    runtime::NamedAudioBuffer named;
+    named.id = "chunk_" + std::to_string(chunk_index);
+    named.audio = generated.audio;
+    event.named_audio_outputs.push_back(std::move(named));
+    event.is_final = (stream_chunk_index_ >= stream_chunk_requests_.size());
+
+    stream_previous_turn_ = FishAudioConversationTurn{fish_request.text, std::move(generated.codes)};
+    runtime::append_audio_buffer(stream_merged_audio_, generated.audio);
+
+    return event;
+}
+
+void FishAudioSession::set_stream_event_sink(runtime::StreamEventCallback sink) {
+    (void)sink;
+}
+
+runtime::TaskResult FishAudioSession::finish_stream() {
+    if (!stream_started_) {
+        throw std::runtime_error("Fish Audio streaming has not been started");
+    }
+    runtime::TaskResult result;
+    result.audio_output = std::move(stream_merged_audio_);
+    reset();
+    return result;
+}
+
+void FishAudioSession::reset() {
+    stream_chunk_requests_.clear();
+    stream_reference_codes_.clear();
+    stream_previous_turn_ = std::nullopt;
+    stream_merged_audio_ = runtime::AudioBuffer{};
+    stream_chunk_index_ = 0;
+    stream_started_ = false;
+}
+
+runtime::StreamEvent FishAudioSession::process_audio_chunk(const runtime::AudioChunk & chunk) {
+    (void)chunk;
+    return runtime::StreamEvent{};
+}
+
+runtime::TaskResult FishAudioSession::finalize() {
+    return finish_stream();
 }
 
 }  // namespace engine::models::fish_audio
